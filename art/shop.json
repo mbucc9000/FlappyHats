@@ -1,0 +1,326 @@
+{
+ "items": [
+  {
+   "key": "sombrero",
+   "label": "SOMBRERO",
+   "price": 700,
+   "kind": "hat",
+   "rows": [
+    "......OO......",
+    ".....OhsO.....",
+    "....OhSSsO....",
+    "....OhSSsO....",
+    "...OhSSSSsO...",
+    "O..OYRYRYRO..O",
+    "OhOOGYGYGYOOsO",
+    "OhhOOOOOOOOssO",
+    "OhSSSSSSSSSSsO",
+    "OrYRYGYRYGYRgO",
+    ".OOOOOOOOOOOO."
+   ],
+   "pal": {
+    "S": "#d9b26a",
+    "h": "#f0d89a",
+    "s": "#a8803e",
+    "R": "#d8443a",
+    "G": "#5a9a2f",
+    "Y": "#ffcf3f",
+    "r": "#d8443a",
+    "g": "#5a9a2f"
+   },
+   "bottom": 6,
+   "center": 12
+  },
+  {
+   "key": "knight",
+   "label": "KNIGHT",
+   "price": 800,
+   "kind": "hat",
+   "rows": [
+    "......OOOO....",
+    "....OOwwRRO...",
+    "...OwwRRRRRO..",
+    "..OwRRrOOrRO..",
+    ".OwRrO.OYdO...",
+    "OwRrOOOOYOOOO.",
+    "ORrOhGGGYGGsO.",
+    "OrOYYYYYYYYYO.",
+    "OO.OhGGkkkkkO.",
+    "...OhGGGYGksO.",
+    "...OhGGGYGksO.",
+    "...OOOOOOOOOO."
+   ],
+   "pal": {
+    "G": "#b8bcc4",
+    "h": "#eef1f5",
+    "s": "#8a8e96",
+    "k": "#2b2630",
+    "R": "#d8443a",
+    "r": "#a8302a",
+    "w": "#f2f2ea",
+    "Y": "#ffcf3f",
+    "d": "#d99a2b"
+   },
+   "bottom": 7,
+   "center": 12
+  },
+  {
+   "key": "admiral",
+   "label": "ADMIRAL",
+   "price": 900,
+   "kind": "hat",
+   "rows": [
+    ".....OOOO.....",
+    "...OOyYYYOO...",
+    "..OYnNNNrrYO..",
+    ".OYnNNNrwwrYO.",
+    "OYnNNNNrwbrNYO",
+    "YnNNNNNNrrNNNY",
+    "YYOOOOOOOOOOYY",
+    "OO..........OO"
+   ],
+   "pal": {
+    "N": "#2a3870",
+    "n": "#4a5ca0",
+    "Y": "#ffcf3f",
+    "y": "#fff0a8",
+    "r": "#d8443a",
+    "w": "#f2f2ea",
+    "b": "#3f8ad8"
+   },
+   "bottom": 7,
+   "center": 12
+  },
+  {
+   "key": "samurai",
+   "label": "SAMURAI",
+   "price": 1000,
+   "kind": "hat",
+   "rows": [
+    "OO..........OO",
+    "OyO...OO...OyO",
+    "OYO..OYdO..OYO",
+    "OYO.OKmKmO.OYO",
+    "OYdOmKmKmKOdYO",
+    ".OYOmKmKmKOYO.",
+    ".OYdOKmKmOdYO.",
+    "OOOOYdOOdYOOOO",
+    "OYRROdYYdORRYO",
+    "OYRrOrrrrOrRYO",
+    "OOOYRYRYRYROOO",
+    "..OOOOOOOOOO.."
+   ],
+   "pal": {
+    "Y": "#ffcf3f",
+    "y": "#fff0a8",
+    "d": "#d99a2b",
+    "K": "#2e2b45",
+    "m": "#615b8c",
+    "R": "#d8443a",
+    "r": "#a8302a"
+   },
+   "bottom": 7,
+   "center": 12
+  },
+  {
+   "key": "pharaoh",
+   "label": "PHARAOH",
+   "price": 1100,
+   "kind": "hat",
+   "rows": [
+    ".....OOOO.....",
+    "....OYYYYO.OO.",
+    "...OBBBBBOOyyO",
+    "..OYYYYYYYOYrO",
+    ".OBBBBBBBBOdYO",
+    "OYYYYYYYYYOYO.",
+    "OBBBBYOyyyyYdO",
+    "OYYYYdOOOOOOO.",
+    "OBBBBdO.......",
+    "OYYYYdO.......",
+    ".OOOOO........"
+   ],
+   "pal": {
+    "B": "#2f66c8",
+    "Y": "#ffcf3f",
+    "y": "#fff0a8",
+    "d": "#d99a2b",
+    "r": "#d8443a"
+   },
+   "bottom": 9,
+   "center": 11
+  },
+  {
+   "key": "spartan",
+   "label": "SPARTAN",
+   "price": 1250,
+   "kind": "hat",
+   "rows": [
+    "..OOOOOOOO....",
+    ".OqqqqqqqqOO..",
+    "OqRrRRrRRrqqO.",
+    "ORRrRRrRRrRRO.",
+    "ORRrRRrRRrRO..",
+    "ORROyyyyyyOO..",
+    "ORROhwhbbsO...",
+    "OROhwhbbbbsO..",
+    "OOhwhbbbbbbsO.",
+    "OhwbbbbbbbbssO",
+    "OdgdgdgdgdgddO",
+    "OsbbsOOOOOOsbO",
+    "OssOO......sbO",
+    ".OO........OO."
+   ],
+   "pal": {
+    "R": "#e0443a",
+    "r": "#a82a24",
+    "q": "#ff8a72",
+    "y": "#ffcf3f",
+    "b": "#c8862e",
+    "h": "#f2c060",
+    "w": "#fff6d0",
+    "s": "#7a4a18",
+    "g": "#ffcf3f",
+    "d": "#5e3612"
+   },
+   "bottom": 9,
+   "center": 13
+  },
+  {
+   "key": "dragon",
+   "label": "DRAGON",
+   "price": 1400,
+   "kind": "hat",
+   "rows": [
+    "..O...O.O.....",
+    ".OdO.OYOYO....",
+    "OdMdOGGGGGO...",
+    "OdMMdGlGwkGO..",
+    "OdMMMGGGkkGGo.",
+    ".OMOMGGpGGGofo",
+    "..OOGGGGyyO.o.",
+    ".OOGGGGyyyO...",
+    "OYOGGGGyyyO...",
+    "OGGGddOddO....",
+    ".OOOOO.OO....."
+   ],
+   "pal": {
+    "G": "#5a9a2f",
+    "l": "#8ed24a",
+    "d": "#3c6e22",
+    "y": "#fff0a8",
+    "Y": "#ffcf3f",
+    "k": "#2b2630",
+    "w": "#ffffff",
+    "p": "#f29cc8",
+    "M": "#f08a24",
+    "o": "#f08a24",
+    "f": "#ffe066"
+   },
+   "bottom": 6,
+   "center": 13
+  },
+  {
+   "key": "tycoon",
+   "label": "TYCOON",
+   "price": 1600,
+   "kind": "hat",
+   "rows": [
+    "............W.",
+    "....OOOOOO.WWW",
+    "...OWwyyydO.W.",
+    "...OwwyyydO...",
+    "...OwyyyydO...",
+    "...OKWWccKO...",
+    "...OKWccbKO...",
+    "...OKKcbKKO...",
+    "...OwyyyydO...",
+    ".OOOOOOOOOOOO.",
+    ".OwwyyyyyyydO.",
+    "..OOOOOOOOOO.."
+   ],
+   "pal": {
+    "y": "#ffcf3f",
+    "w": "#fff0a8",
+    "d": "#d99a2b",
+    "K": "#2b2630",
+    "c": "#aef0ff",
+    "b": "#4ab8e8",
+    "W": "#ffffff"
+   },
+   "bottom": 7,
+   "center": 12
+  },
+  {
+   "key": "ufo",
+   "label": "UFO",
+   "price": 1800,
+   "kind": "hat",
+   "rows": [
+    ".....OOOO.....",
+    "....OwaacO....",
+    "...OcakkaCO...",
+    "..OOccaaCCOO..",
+    ".OhhhhhhhhhhO.",
+    "OsRssYssGssBsO",
+    ".ODddddddddDO.",
+    "..OOOOTTOOOO..",
+    ".....tTTt.....",
+    "....tTTTTt...."
+   ],
+   "pal": {
+    "w": "#ffffff",
+    "c": "#8fe3f0",
+    "C": "#5cc0d8",
+    "a": "#8ed24a",
+    "k": "#2b2630",
+    "h": "#f4f7fa",
+    "s": "#c6ccd4",
+    "d": "#8a9096",
+    "D": "#5f656c",
+    "R": "#ff5a4a",
+    "Y": "#ffcf3f",
+    "G": "#5ae05a",
+    "B": "#4a9cff",
+    "t": "#eaffb8",
+    "T": "#fbffe6"
+   },
+   "bottom": 5,
+   "center": 12
+  },
+  {
+   "key": "cosmic",
+   "label": "COSMIC",
+   "price": 2000,
+   "kind": "hat",
+   "rows": [
+    "......yy......",
+    ".y...yWWy...y.",
+    "yWy...yy...yWy",
+    ".y...OLLO...y.",
+    "OLO.OLhhLO.OLO",
+    "OPLOLhhPPLOLPO",
+    "OPPLhhPPPPLwPO",
+    "OPwPhhPPPPPPPO",
+    "OQQQhhQQQQQnQO",
+    "OQnQQhhQQQwQQO",
+    "OgcggcggcggcgO",
+    ".OOOOOOOOOOOO."
+   ],
+   "pal": {
+    "L": "#8f74e8",
+    "P": "#5a3cb8",
+    "Q": "#2f1d6e",
+    "h": "#fff0a8",
+    "w": "#ffffff",
+    "W": "#ffffff",
+    "y": "#ffe066",
+    "n": "#e85dd0",
+    "g": "#ffcf3f",
+    "c": "#7fe0ff"
+   },
+   "bottom": 7,
+   "center": 12
+  }
+ ]
+}
