@@ -11,6 +11,7 @@
 #include <mach-o/dyld.h>
 #include <string.h>
 #include "Tick.h"
+#include "Store.h"
 
 #define FH_VA_PUSH_EVENT 0x7414   // void (engine*, int event, int arg)
 #define EV_WING          13
@@ -45,14 +46,19 @@ static void FHPushHook(void *engine, int ev, int arg) {
 
 int FHTickEnabled(void) { return gOn; }
 
-void FHTickSetEnabled(int on) {
+void FHTickSetEnabled(int on) {   // a touch-down pulled the shared save just before (Hats.x FHTouch)
     gOn = on ? 1 : 0;
-    [[NSUserDefaults standardUserDefaults] setBool:gOn forKey:@"FHFlapTick"];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    FHStoreSet(@"FHFlapTick", gOn ? @YES : @NO);   // a boolean, as setBool: wrote it
+    FHStoreSync();
     if (gOn) {
         FHTickLoadPattern();   // pick up a KeyTick change
         FHTickFire();          // feel it right away
     }
+}
+
+void FHTickReload(void) {
+    gOn = FHStoreGetBool(@"FHFlapTick");
+    FHTickLoadPattern();
 }
 
 %ctor {
@@ -72,8 +78,8 @@ void FHTickSetEnabled(int on) {
         if (!found || memcmp((void *)(FH_VA_PUSH_EVENT + slide), kPush, sizeof kPush) != 0) return;
         gVibrate = (void (*)(unsigned int, id, NSDictionary *))dlsym(RTLD_DEFAULT, "AudioServicesPlaySystemSoundWithVibration");
         gTickQ = dispatch_queue_create("com.mbucc9000.flappyhats.tick", DISPATCH_QUEUE_SERIAL);
-        FHCopyOnce();
-        gOn = [[NSUserDefaults standardUserDefaults] boolForKey:@"FHFlapTick"];
+        FHStoreInit();         // whichever %ctor runs first: the shared save is ready before anything reads it
+        gOn = FHStoreGetBool(@"FHFlapTick");
         FHTickLoadPattern();
         MSHookFunction((void *)((FH_VA_PUSH_EVENT + slide) | 1), (void *)FHPushHook, (void **)&gOrigPush);
     }

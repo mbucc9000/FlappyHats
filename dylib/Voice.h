@@ -44,3 +44,5 @@ int   FHSndPreview(int slot);        // after the slider: what the game plays fo
                                      // use, else the stock sound); 1 = playing or about to, 0 = nothing (0 %, busy, off)
 void  FHSndDied(void);               // the frame the ground stops (any death): with a GAME OVER recording in use and no
                                      // die sound from the game (a ground death), Voice.x plays it itself
+void  FHSndReload(void);             // Hats.x FHRefresh: the other Flappy Hats app changed the shared save: serials,
+                                     // recordings (by file identity) and volumes again; waits for a take in progress

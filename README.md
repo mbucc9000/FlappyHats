@@ -8,11 +8,11 @@ Flappy Bird 1.1.0 for iOS 6 with a shop: hats and skins you unlock with your bes
 
 - A SHOP button on the title screen opens HATS, SKINS and SOUND tabs: 37 hats and 49 skins, each previewed on the bird. Press and hold the cat ears or the cat skin for 11 colours.
 - Score Rewards unlock with your best score (5 to 200). The rest are for sale: every game earns points equal to your score, and premium hats go up to 2000.
-- Your Flappy Bird best score carries over on first launch, so rewards unlock right away.
+- Every Flappy Bird on the phone (the App Store one, Flappy 60FPS and both Flappy Hats apps) shares one best score, so rewards unlock right away.
 - Record your own flap, point and game over sounds (up to 2 seconds, trimmed and levelled), each with its own volume up to 200%.
 - An optional tick on every flap, at KeyTick's strength and length if you have KeyTick.
 - Installs as its own app, Flappy Hats, next to the original. No ads, no crash on death when Game Center is signed in, and pressing home doesn't restart the game.
-- Flappy Hats 60FPS is the same mod on the 60fps game (home screen name Hats 60FPS). On first launch it starts with your Flappy Hats points, items and sounds; after that each app keeps its own.
+- Flappy Hats 60FPS is the same mod on the 60fps game (home screen name Hats 60FPS). It shares one save with Flappy Hats, live: points, items, colours, outfit, sounds, volumes and vibrate.
 
 ## How to use
 

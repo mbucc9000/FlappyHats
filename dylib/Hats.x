@@ -14,15 +14,18 @@
 //
 // Offsets are for Flappy Bird 1.1.0 (the stock and 60fps builds share them). The 60fps build draws twice as many
 // frames, so per-frame steps (spin, shop animation, toast, fling) are scaled by gStep to keep the same speed.
-// A second Flappy Hats app (the 60fps one) copies the first one's save and sounds on its first launch (FHCopyOnce).
+// Both Flappy Hats apps (this and the 60fps one) keep ONE save and one recordings folder (Store.m), read again on every
+// resume (FHRefresh), and every Flappy on the phone shares one stock best (score.dat, FHSyncStock).
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <substrate.h>
 #include <mach-o/dyld.h>
+#include <objc/runtime.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -30,6 +33,7 @@
 #include "SkinsData.h"
 #include "Voice.h"
 #include "Tick.h"
+#include "Store.h"
 
 @interface dot_EAGLView : UIView
 @end
@@ -40,12 +44,12 @@
 #define FH_VA_PUSH_EVENT    0x7414   // void (engine*, id, arg)  9 = point sound, 10 = swoosh
 #define FH_VA_LAYER_DRAW    0x8d94   // void (layer*, engine*)   last scene layer
 #define FH_VA_60FPS         0x6844   // nop.w in the 60fps build; stock: the beq.w that skips every other draw
-#define FH_MAIN_ID          @"com.mbucc9000.flappyhats"   // the app a second Flappy Hats app copies its first save from
 
 #define E_SPRITES   0x120   // sprite*[512]
 #define E_QUADS     0x5c    // queued quads this frame (batch holds 256)
 #define E_TITLE     0x550   // byte: title screen
 #define E_SCORE     0x538   // current score
+#define E_BEST      0x53c   // the best the score panel starts from (0x9164), raised at every game over (0x7444)
 #define E_SCROLL    0x5c0   // ground scroll speed; 0 once the bird is dead
 #define E_BTN_START 0x558   // native button nodes: +0xc x, +0x10 y, +0x14 w, +0x18 h
 #define E_BTN_SCORE 0x56c
@@ -137,6 +141,7 @@ static FILE *FHOpenLog(void) {
     return fopen(path, (stat(path, &st) == 0 && st.st_size > 256 * 1024) ? "w" : "a");
 }
 
+static void FHLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void FHLog(const char *fmt, ...) {
     FILE *f = FHOpenLog();
     if (!f) return;
@@ -374,22 +379,16 @@ static int FHPickOf(int tab, int i) {
     return (r != i && FHOwns(tab, r)) ? r : i;
 }
 
-// ---- persistence ----
-static void FHSave(void) {
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    [d setInteger:gPoints forKey:@"FHPoints"];
-    [d setInteger:gBest forKey:@"FHBest"];
-    [d setInteger:gLifetime forKey:@"FHLifetime"];
-    [d setObject:[gOwned allObjects] forKey:@"FHOwned"];
-    [d setObject:[NSString stringWithUTF8String:kFHHats[gHat].key] forKey:@"FHHat"];
-    [d setObject:[NSString stringWithUTF8String:kFHSkins[gSkin].key] forKey:@"FHSkin"];
-    NSMutableDictionary *colors = [NSMutableDictionary dictionary];   // item key -> the colour key it shows
-    for (int tab = 0; tab < 2; tab++)
-        for (int i = 0; i < FHCount(tab); i++)
-            if (gPick[tab][i] != i)
-                colors[[NSString stringWithUTF8String:FHKey(tab, i)]] = [NSString stringWithUTF8String:FHKey(tab, gPick[tab][i])];
-    [d setObject:colors forKey:@"FHColors"];
-    [d synchronize];
+// ---- persistence: the shared save (Store.m) ----
+// Both Flappy Hats apps keep one save. Every value is read from it at launch (FHLoad) and again whenever a pull finds
+// the other app's changes (FHRefresh: every -start, a touch on the title screen or the shop, every death); a save
+// writes only the values that changed, and never lowers the best / lifetime or drops an owned item.
+static NSArray *FHStrings(id a) {   // the strings of a saved array (FHOwned), sorted: the same set saves the same array
+    NSMutableSet *s = [NSMutableSet set];
+    if ([a isKindOfClass:[NSArray class]])
+        for (id x in a)
+            if ([x isKindOfClass:[NSString class]]) [s addObject:x];
+    return [[s allObjects] sortedArrayUsingSelector:@selector(compare:)];
 }
 
 static int FHGrantMilestones(void) {
@@ -407,6 +406,33 @@ static int FHGrantMilestones(void) {
     return granted;
 }
 
+static void FHSave(void) {
+    int best = FHStoreGetInt(@"FHBest", 0);                          // insurance (a pull already ran): never under what
+    gLifetime = MAX(gLifetime, FHStoreGetInt(@"FHLifetime", 0));     // the save holds, never an owned item less
+    [gOwned addObjectsFromArray:FHStrings(FHStoreGet(@"FHOwned"))];
+    if (best > gBest) {
+        gBest = best;
+        FHGrantMilestones();
+    }
+    FHStoreSet(@"FHPoints", @(gPoints));                             // same keys and types as before (old builds read them)
+    FHStoreSet(@"FHBest", @(gBest));
+    FHStoreSet(@"FHLifetime", @(gLifetime));
+    FHStoreSet(@"FHOwned", FHStrings([gOwned allObjects]));
+    FHStoreSet(@"FHHat", [NSString stringWithUTF8String:kFHHats[gHat].key]);
+    FHStoreSet(@"FHSkin", [NSString stringWithUTF8String:kFHSkins[gSkin].key]);
+    NSMutableDictionary *colors = [NSMutableDictionary dictionary];   // item key -> the colour key it shows
+    for (int tab = 0; tab < 2; tab++)
+        for (int i = 0; i < FHCount(tab); i++)
+            if (gPick[tab][i] != i)
+                colors[[NSString stringWithUTF8String:FHKey(tab, i)]] = [NSString stringWithUTF8String:FHKey(tab, gPick[tab][i])];
+    FHStoreSet(@"FHColors", colors);
+    // what this build knows was owned / reached, in a key only this build writes: an older build still running (or
+    // put back) rewrites FHOwned / FHBest / FHLifetime from its own older copy but leaves this alone (CF puts only
+    // its own keys on top), so FHApplyStore can put them back
+    FHStoreSet(@"FHFloor", @{ @"FHOwned": FHStrings([gOwned allObjects]), @"FHBest": @(gBest), @"FHLifetime": @(gLifetime) });
+    FHStoreSync();                                                   // one write, only if something changed
+}
+
 static int FHReadBest(NSString *path) {
     FILE *f = fopen([path fileSystemRepresentation], "rb");
     if (!f) return 0;
@@ -416,7 +442,8 @@ static int FHReadBest(NSString *path) {
     return (n >= 1 && v[0] >= 0 && v[0] < 100000) ? v[0] : 0;
 }
 
-// The highest best across every Flappy Bird install on the phone (App Store copy + /Applications ones).
+// The highest best across every Flappy Bird install on the phone (App Store copy + /Applications ones). First run only:
+// after that the shared stock best (FHSyncStock) keeps gBest up.
 static int FHExistingBest(void) {
     int best = FHReadBest(@"/var/mobile/Documents/score.dat");
     NSString *apps = @"/var/mobile/Applications";
@@ -428,44 +455,24 @@ static int FHExistingBest(void) {
     return best;
 }
 
-// A second Flappy Hats app (the 60fps one) starts with the first one's progress: on its very first launch it copies
-// FH_MAIN_ID's saved values (every FH key) and recorded sounds once. After that each app keeps its own.
-// Called from both %ctors (Tick.x reads FHFlapTick in its own), whichever runs first.
-void FHCopyOnce(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSString *me = [[NSBundle mainBundle] bundleIdentifier];
-        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-        if (!me || [me isEqualToString:FH_MAIN_ID] || [d objectForKey:@"FHSeeded"]) return;   // not a first launch
-        NSDictionary *src = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/" FH_MAIN_ID @".plist"];
-        if (![src[@"FHSeeded"] boolValue]) return;                 // Flappy Hats never ran: a normal first run
-        int keys = 0, files = 0;
-        for (NSString *k in src)
-            if ([k isKindOfClass:[NSString class]] && [k hasPrefix:@"FH"]) { [d setObject:src[k] forKey:k]; keys++; }
-        [d synchronize];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSString *from = [@"/var/mobile/Library/FlappyHats" stringByAppendingPathComponent:FH_MAIN_ID];
-        NSString *to = [@"/var/mobile/Library/FlappyHats" stringByAppendingPathComponent:me];
-        [fm createDirectoryAtPath:to withIntermediateDirectories:YES attributes:nil error:NULL];
-        for (NSString *f in [fm contentsOfDirectoryAtPath:from error:NULL] ?: @[])
-            if ([fm copyItemAtPath:[from stringByAppendingPathComponent:f] toPath:[to stringByAppendingPathComponent:f] error:NULL])
-                files++;
-        FHLog("first run: copied %d saved values and %d sound files from %s", keys, files, [FH_MAIN_ID UTF8String]);
-    });
-}
+static int FHIntOfValue(id v) { return ([v isKindOfClass:[NSNumber class]] || [v isKindOfClass:[NSString class]]) ? [v intValue] : 0; }
 
-static void FHLoad(void) {
-    FHCopyOnce();
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    gOwned =[NSMutableSet setWithArray:[d arrayForKey:@"FHOwned"] ?: @[]];
-    gPoints = (int)[d integerForKey:@"FHPoints"];
-    gBest = (int)[d integerForKey:@"FHBest"];
-    gLifetime = (int)[d integerForKey:@"FHLifetime"];
-    gHat = FHLoadRow(0, [d stringForKey:@"FHHat"]);     // a colour row's key ("catears.black") finds that row
-    gSkin = FHLoadRow(1, [d stringForKey:@"FHSkin"]);
+// Every FH value from the shared save (launch, and a pull that found changes). 1 = a floor raised something above
+// what the save holds: the caller saves it back. The floors: FHFloor (FHSave: everything this build ever saw owned /
+// reached) and FHMerge60 (the 60fps save merged in once). Older builds never write either, so an older build still
+// running through the upgrade (or put back) that writes its older owned set / best over the shared save can never
+// lose an item, the best or the lifetime total. (Points are not a floor: buying lowers them.)
+static int FHApplyStore(void) {
+    gOwned = [NSMutableSet setWithArray:FHStrings(FHStoreGet(@"FHOwned"))];
+    gPoints = FHStoreGetInt(@"FHPoints", 0);
+    gBest = FHStoreGetInt(@"FHBest", 0);
+    gLifetime = FHStoreGetInt(@"FHLifetime", 0);
+    gHat = FHLoadRow(0, FHStoreGetString(@"FHHat"));     // a colour row's key ("catears.black") finds that row
+    gSkin = FHLoadRow(1, FHStoreGetString(@"FHSkin"));
     for (int tab = 0; tab < 2; tab++)
         for (int i = 0; i < FHCount(tab); i++) gPick[tab][i] = i;
-    NSDictionary *colors = [d dictionaryForKey:@"FHColors"];   // absent before this version: every item its own look
+    id saved = FHStoreGet(@"FHColors");                  // absent before 1.1.0: every item its own look
+    NSDictionary *colors = [saved isKindOfClass:[NSDictionary class]] ? saved : nil;
     for (id k in colors) {
         id v = colors[k];
         if (![k isKindOfClass:[NSString class]] || ![v isKindOfClass:[NSString class]]) continue;
@@ -474,18 +481,91 @@ static void FHLoad(void) {
             if (b >= 0 && r >= 0 && FHParent(tab, r) == b) gPick[tab][b] = r;   // gone / moved colours: dropped
         }
     }
-    if (![d boolForKey:@"FHSeeded"]) {
+    int raised = 0;
+    NSString *const floors[] = { @"FHFloor", @"FHMerge60" };
+    for (int f = 0; f < 2; f++) {
+        id fl = FHStoreGet(floors[f]);
+        if (![fl isKindOfClass:[NSDictionary class]]) continue;
+        NSUInteger n = gOwned.count;
+        [gOwned addObjectsFromArray:FHStrings(fl[@"FHOwned"])];
+        int b = FHIntOfValue(fl[@"FHBest"]), l = FHIntOfValue(fl[@"FHLifetime"]);
+        if (gOwned.count != n || b > gBest || l > gLifetime) {
+            FHLog("save: the shared save lost part of %s (an older build wrote over it): owned %lu -> %lu, best %d -> %d, "
+                  "lifetime %d -> %d, put back", f ? "the merged 60fps save" : "what this build saved", (unsigned long)n,
+                  (unsigned long)gOwned.count, gBest, MAX(gBest, b), gLifetime, MAX(gLifetime, l));
+            raised = 1;
+        }
+        gBest = MAX(gBest, b);
+        gLifetime = MAX(gLifetime, l);
+    }
+    return raised;
+}
+
+static void FHFixEquipped(void) {   // something worn that is not owned (a colour: back to its item, else the default)
+    if (!FHOwns(0, gHat)) gHat = FHOwns(0, FHBaseOf(0, gHat)) ? FHBaseOf(0, gHat) : 0;
+    if (!FHOwns(1, gSkin)) gSkin = FHOwns(1, FHBaseOf(1, gSkin)) ? FHBaseOf(1, gSkin) : 0;
+}
+
+// ---- the stock best every Flappy shares (score.dat, Store.m FHScoreSync) ----
+static int *FHViewInt(id view, const char *name) {   // an int ivar of the game's view, by name (the binary's ivar list)
+    Ivar iv = view ? class_getInstanceVariable(object_getClass(view), name) : NULL;
+    return iv ? (int *)((char *)(__bridge void *)view + ivar_getOffset(iv)) : NULL;
+}
+
+// Launch (view nil: from the %ctor, before -initWithFrame: reads score.dat) and every -start. The game reads score.dat
+// only at launch and writes its own in-memory best back at every game over, so on a resume this game's best (the view's
+// highScore, ivar 0x260, and the engine's, which the score panel shows) is raised to the shared one: its panel shows it
+// and its next game over keeps it. The Flappy Hats best (SCORE REWARDS) takes it too.
+static void FHSyncStock(id view) {
+    int *hs = FHViewInt(view, "highScore"), *np = FHViewInt(view, "numOfPlay");
+    FHScore low = { FHStoreGetInt(@"FHStockBest", 0), FHStoreGetInt(@"FHStockPlays", 0) };
+    if (hs && *hs >= 0 && *hs < 100000) low.best = MAX(low.best, *hs);     // what this game holds right now
+    if (np && *np >= 0) low.plays = MAX(low.plays, *np);
+    if (gEngine && FHInt(gEngine, E_BEST) >= 0 && FHInt(gEngine, E_BEST) < 100000) low.best = MAX(low.best, FHInt(gEngine, E_BEST));
+    FHScore m = FHScoreSync(low);
+    if (hs && *hs < m.best) *hs = m.best;
+    if (gEngine && FHInt(gEngine, E_BEST) < m.best) *(int *)((char *)gEngine + E_BEST) = m.best;
+    if (m.best > gBest) {
+        int was = gBest;
+        gBest = m.best;
+        int g = FHGrantMilestones();
+        FHSave();
+        FHLog("best: the shared Flappy Bird best %d is above the Flappy Hats best %d: best %d now, %d reward items unlocked",
+              m.best, was, gBest, g);
+    }
+}
+
+static void FHLoad(void) {   // %ctor
+    FHStoreInit();           // the first pull, the safety backup, the one-time merge (Tick.x's %ctor may have run it)
+    int raised = FHApplyStore();
+    if (!FHStoreGetBool(@"FHSeeded")) {
         int existing = FHExistingBest();
         gBest = MAX(gBest, existing);
         int g = FHGrantMilestones();
-        [d setBool:YES forKey:@"FHSeeded"];
+        FHStoreSet(@"FHSeeded", @YES);
         FHSave();
         FHLog("first run: existing best %d, %d reward items unlocked", existing, g);
-    } else if (FHGrantMilestones()) {   // rewards added in an update unlock from the best already reached
+    } else if (FHGrantMilestones() || raised) {   // rewards added in an update unlock from the best already reached
         FHSave();
     }
-    if (!FHOwns(0, gHat)) gHat = FHOwns(0, FHBaseOf(0, gHat)) ? FHBaseOf(0, gHat) : 0;   // a colour: back to its item
-    if (!FHOwns(1, gSkin)) gSkin = FHOwns(1, FHBaseOf(1, gSkin)) ? FHBaseOf(1, gSkin) : 0;
+    FHFixEquipped();
+    FHSyncStock(nil);        // before -initWithFrame: reads score.dat
+}
+
+// Pull: the other Flappy Hats app may have changed the shared save (it can only run while this one is away, or just
+// after). Called before anything here can change a value: every -start, a touch on the title screen or the shop, every
+// death. One stat() when nothing changed.
+static void FHRefresh(const char *why) {
+    int r = FHStoreReload();     // 1: changed elsewhere; 2: only to be sure (AdMob rewrote the file under our commit)
+    if (!r) return;
+    int raised = FHApplyStore();
+    if (FHGrantMilestones() || raised) FHSave();
+    FHFixEquipped();
+    FHTickReload();          // the vibrate switch (Tick.x)
+    FHSndReload();           // serials, recordings, volumes (Voice.x; waits for a take in progress; logs what changed)
+    if (r == 1)
+        FHLog("save: reloaded the shared save (%s): points %d, best %d, lifetime %d, owned %lu, hat %s, skin %s", why,
+              gPoints, gBest, gLifetime, (unsigned long)gOwned.count, kFHHats[gHat].key, kFHSkins[gSkin].key);
 }
 
 static void FHBank(int score) {
@@ -497,8 +577,9 @@ static void FHBank(int score) {
     }
     gToastPoints = score;
     gToastFrames = 150 * gStep;        // 5 s
+    if (score > FHStoreGetInt(@"FHStockBest", 0)) FHStoreSet(@"FHStockBest", @(score));   // the game just wrote it to score.dat
     FHSave();
-    FHLog("died with %d: points %d, best %d", score, gPoints, gBest);
+    FHLog("died with %d: points %d, best %d", score, gPoints, gBest);   // Store.m's merge reads this line: keep its shape
 }
 
 // ---- bird ----
@@ -1304,6 +1385,7 @@ static void FHFrameUI(void *engine) {
     int title = *((unsigned char *)engine + E_TITLE);
     int scroll = FHInt(engine, E_SCROLL);
     if (!title && gPrevScroll > 0 && scroll == 0) {   // the ground stops: the bird died (pipe or ground)
+        FHRefresh("death");            // banked on top of the newest save (one stat() when nothing changed)
         FHBank(FHInt(engine, E_SCORE));
         FHSndDied();                   // no die sound on a ground death: Voice.x plays a GAME OVER recording itself
     }
@@ -1359,6 +1441,7 @@ static int FHTouch(UIView *view, NSSet *touches, int phase) {
     int title = *((unsigned char *)gEngine + E_TITLE);
 
     if (phase == 0) {   // began
+        if (gShopOpen || title) FHRefresh("touch");   // every shop action starts with a touch-down: on the newest save
         if (gShopOpen) {
             gConsuming = 1;          // nothing reaches the game while the shop is up
             gPressed = EL_NONE;
@@ -1477,11 +1560,14 @@ static int FHTouch(UIView *view, NSSet *touches, int phase) {
 %hook dot_EAGLView
 
 - (void)start {   // 0x3e98: launch (after initWithFrame: + setup) and every applicationDidBecomeActive: (0x2ca8)
+    FHRefresh("resume");   // the other Flappy Hats app may have changed the shared save while this one was away
+    FHSyncStock(self);     // ...and any Flappy the shared best (this game read score.dat only at launch)
     %orig;
     FHSndAttach(self);
 }
 
-- (void)stop {    // 0x3f68: applicationWillResignActive: / DidEnterBackground: (0x2c3c, 0x2c70); no frames until -start
+- (void)stop {    // 0x3f68: applicationWillResignActive: / DidEnterBackground: (0x2c3c, 0x2c70); no frames until -start.
+                  // Nothing is saved here: the other app may be the next one in front
     FHSoundRecEnd(FHSndCancel);
     if (gRecTouch) { gRecTouch = 0; gPressed = EL_NONE; gPressedInside = 0; gConsuming = 0; }
     if (gVolTouch) { FHVolEnd(0); gPressed = EL_NONE; gPressedInside = 0; gConsuming = 0; }   // no save, no preview

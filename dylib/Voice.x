@@ -39,19 +39,26 @@
 // updateFromFlags 0x1f8d8). The session is never deactivated, the OpenAL context is never touched, and no
 // ObjectAL session setter is called (they recompute the category).
 //
-// Files: /var/mobile/Library/FlappyHats/<bundle id>/ rec.caf (raw, shared: one take at a time), then per sound
-// take.caf + flap.caf (mono), take_point.caf + point.caf (stereo) and take_over.caf + over.caf (stereo, like
-// sfx_die). Defaults: FHSndTake / FHSndUsing, FHSndPointTake / FHSndPointUsing and FHSndOverTake / FHSndOverUsing
-// (take serials; 0 = none / the stock sound); FHSndVolFlap / FHSndVolPoint / FHSndVolOver (float, 1.0 when absent).
+// Files: the recordings both Flappy Hats apps share, in /var/mobile/Library/FlappyHats/com.mbucc9000.flappyhats/
+// (FHSndPath): per sound take.caf + flap.caf (mono), take_point.caf + point.caf (stereo) and take_over.caf + over.caf
+// (stereo, like sfx_die). Only ever replaced by rename (or unlinked), so a file's identity (inode, mtime, size) tells
+// a reload that it changed. This app's own working files, in /var/mobile/Library/FlappyHats/<bundle id>/
+// (FHSndScratch): rec.caf (raw, one take at a time), every *.tmp.caf, and the louder copies, so a build on one app's
+// queue never renames into a file the other app reads. One filesystem: tmp -> rename still works across the folders.
+// Saved (the shared save, Store.m): FHSndTake / FHSndUsing, FHSndPointTake / FHSndPointUsing and FHSndOverTake /
+// FHSndOverUsing (take serials; 0 = none / the stock sound); FHSndVolFlap / FHSndVolPoint / FHSndVolOver (float, 1.0
+// when absent). A saved serial only goes back to 0 when its file is gone (ENOENT), never because a load failed, so a
+// passing failure can't wipe the other app's choice. FHSndReload reads them again when the other app changed them.
 // Louder copies: <slot>_boost.caf (what the game plays, made from the file in use or the stock bundle file) and
 // <slot>_take_boost.caf (the take on screen, for PLAY before USE); remade at launch, on a volume / USE / RESET /
-// new take, never trusted across launches. Built on gBQ, a low-priority serial queue of their own.
+// new take / reload, never trusted across launches. Built on gBQ, a low-priority serial queue of their own.
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #include <objc/runtime.h>
+#include <errno.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -62,6 +69,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "Voice.h"
+#include "Store.h"
 
 // ObjectAL is compiled into the flap executable: declared here, reached by name only (no class symbols)
 @interface OpenALManager : NSObject
@@ -108,10 +116,10 @@ typedef struct {
     float gameGain;                      // what the game sets before playing it (previews; the hook reads it live)
     float stockRMSPC;                    // the stock file's active RMS measured on the PC (until the phone measures it)
     UInt32 channels;                     // file channels: the flap is mono like sfx_wing, the point stereo like sfx_point
-    const char *take, *takeTmp, *use, *useTmp;   // files
-    const char *takeKey, *useKey;                // NSUserDefaults
+    const char *take, *takeTmp, *use, *useTmp;   // files: take / use shared (FHSndPath), the tmps this app's (FHSndScratch)
+    const char *takeKey, *useKey;                // the shared save (same keys as before; Store.m's merge names them too)
     int matchLoud;                       // 1: play at the stock sound's loudness; 0: at the game's gain, as recorded
-    const char *volKey;                  // NSUserDefaults: the volume, float 0..2 (absent = 1.0)
+    const char *volKey;                  // the shared save: the volume, float 0..2 (absent = 1.0)
 } FHSlotDef;
 
 static const FHSlotDef kSlot[FH_SND_SLOTS] = {
@@ -160,10 +168,16 @@ static NSNotification *gHeldErr;                   // an ObjectAL session reset 
 static UIBackgroundTaskIdentifier gBgTask;
 static BOOL gBgOn;
 
+// ---- the shared recordings (main thread only) ----
+typedef struct { int exists; uint64_t ino; long mtime; long long size; } FHFileId;   // stat() of a shared file
+static FHFileId gTakeId[FH_SND_SLOTS], gUseId[FH_SND_SLOTS];   // take / use files as last loaded or written here
+static int gLoadTok[FH_SND_SLOTS];                 // the newest FHQLoad asked per slot: an older answer is dropped
+static BOOL gReloadWanted;                         // FHSndReload waits for a take of ours (recording / saving)
+
 // ---- volume + louder copies (main thread only; gBQ only ever gets copies of these values) ----
 enum { FHBoostUse, FHBoostTake, FH_BOOST_KINDS };    // a copy of what the game plays / of the take on screen (PLAY)
 static int gVolPct[FH_SND_SLOTS] = { 100, 100, 100 };   // the slider, 0..200 (% of the default loudness), per slot
-static BOOL gVolLoaded;                              // gVolPct read from NSUserDefaults (first FHVolLoad, attach or UI)
+static BOOL gVolLoaded;                              // gVolPct read from the shared save (first FHVolLoad, attach or UI)
 static NSString *gStockPath[FH_SND_SLOTS];           // the bundle file each stock buffer was loaded from
 static id gBoostBuf[FH_SND_SLOTS][FH_BOOST_KINDS];   // the louder copy that landed (nil = none)
 static float gBoostG[FH_SND_SLOTS][FH_BOOST_KINDS];  // ...the play gain it was made for
@@ -239,14 +253,49 @@ static int FHSlot(int k) { return k >= 0 && k < FH_SND_SLOTS ? k : FHSlotFlap; }
 
 static float FHdB(float x) { return 20.0f * log10f(MAX(x, 1e-6f)); }
 
-static NSString *FHSndPath(NSString *name) {   // main and gQ
+#define FH_SND_SHARED @"/var/mobile/Library/FlappyHats/" FH_STORE_APP   // the main app's folder, as before
+
+static void FHSndMkdir(NSString *dir) {   // a folder made by a root run (SSH) still belongs to mobile: the apps write it
+    NSDictionary *own = geteuid() == 0 ? @{ NSFileOwnerAccountID: @501, NSFileGroupOwnerAccountID: @501 } : nil;
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:own error:NULL];
+}
+
+static NSString *FHSndPath(NSString *name) {   // main, gQ and gBQ: a recording both Flappy Hats apps share
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ FHSndMkdir(FH_SND_SHARED); });
+    return [FH_SND_SHARED stringByAppendingPathComponent:name];
+}
+
+static NSString *FHSndScratch(NSString *name) {   // main, gQ and gBQ: this app's own working file (rec, tmp, louder copies)
     static NSString *dir;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{   // per bundle id, like NSUserDefaults: the test and release apps never share a sound
+    dispatch_once(&once, ^{   // per bundle id (the main app's is the shared folder itself: its old layout, unchanged)
         dir = [@"/var/mobile/Library/FlappyHats" stringByAppendingPathComponent:[[NSBundle mainBundle] bundleIdentifier] ?: @"app"];
-        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+        FHSndMkdir(dir);
     });
     return [dir stringByAppendingPathComponent:name];
+}
+
+static FHFileId FHFileIdOf(NSString *path) {   // a shared file's identity: every write of one is a rename (a new inode)
+    FHFileId f;
+    memset(&f, 0, sizeof f);
+    struct stat st;
+    if (stat([path fileSystemRepresentation], &st) == 0) {
+        f.exists = 1;
+        f.ino = (uint64_t)st.st_ino;
+        f.mtime = (long)st.st_mtimespec.tv_sec;
+        f.size = (long long)st.st_size;
+    }
+    return f;
+}
+
+static BOOL FHFileIdEq(FHFileId a, FHFileId b) {
+    return a.exists == b.exists && (!a.exists || (a.ino == b.ino && a.mtime == b.mtime && a.size == b.size));
+}
+
+static BOOL FHFileGone(NSString *path) {   // only this may send a saved serial back to 0: the file is really not there
+    struct stat st;
+    return stat([path fileSystemRepresentation], &st) != 0 && errno == ENOENT;
 }
 
 static NSString *FHRoute(void) {
@@ -275,11 +324,19 @@ static id FHSndLoad(NSString *path, BOOL mono) {   // main: an ALBuffer from an 
     return [m bufferFromFile:path reduceToMono:mono];
 }
 
-static void FHSndSave(int k) {
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    [d setInteger:gTakeSerial[k] forKey:@(kSlot[k].takeKey)];
-    [d setInteger:gUsingSerial[k] forKey:@(kSlot[k].useKey)];
-    [d synchronize];
+// A slot's serial into the shared save, ONLY the one that changed: the other one may be stale here (a take landing
+// after a pull that refreshed CF's copy but whose reload waits for this very take) and must never be written back.
+// The file it names changed too: always a commit (a new take can reuse a serial once one was dropped to 0).
+static void FHSndSaveTake(int k) {
+    FHStoreSet(@(kSlot[k].takeKey), @(gTakeSerial[k]));   // an integer, as setInteger: wrote it
+    FHStoreTouch();
+    FHStoreSync();
+}
+
+static void FHSndSaveUse(int k) {
+    FHStoreSet(@(kSlot[k].useKey), @(gUsingSerial[k]));
+    FHStoreTouch();
+    FHStoreSync();
 }
 
 static float FHPlayGain(float gameGain, float stockRMS, float takeRMS) {   // same loudness as the stock sound it replaces
@@ -610,16 +667,16 @@ static int FHProcess(NSString *rawPath, NSString *outPath, double maxSecs, doubl
 }
 
 // ---- main: volume + louder copies ----
-static void FHVolLoad(void) {   // the saved volumes, once: at attach, or when the SOUND tab asks first
+static int FHVolStored(int k) {   // slot k's saved volume in % (the shared save)
+    float v = FHStoreGetFloat(@(kSlot[k].volKey), 1.0f);   // absent = 1.0 = exactly as before
+    // clamped before the conversion (a huge or inf value would overflow lrintf); NaN: 100
+    return v >= 0.0f ? (int)lrintf(MIN(v, 2.0f) * 100.0f) : v < 0.0f ? 0 : 100;
+}
+
+static void FHVolLoad(void) {   // the saved volumes, once: at attach, or when the SOUND tab asks first (FHSndReload: again)
     if (gVolLoaded) return;
     gVolLoaded = YES;
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    for (int k = 0; k < FH_SND_SLOTS; k++) {
-        NSString *key = @(kSlot[k].volKey);
-        float v = [d objectForKey:key] ? [d floatForKey:key] : 1.0f;   // absent = 1.0 = exactly as before
-        // clamped before the conversion (a huge or inf value would overflow lrintf); NaN: 100
-        gVolPct[k] = v >= 0.0f ? (int)lrintf(MIN(v, 2.0f) * 100.0f) : v < 0.0f ? 0 : 100;
-    }
+    for (int k = 0; k < FH_SND_SLOTS; k++) gVolPct[k] = FHVolStored(k);
 }
 
 static float FHVol(int k) { return (float)gVolPct[k] / 100.0f; }
@@ -682,7 +739,7 @@ static void FHBoostForget(int k, int kind) {   // no copy wanted (any build stil
 static void FHMainBoosted(int k, int kind, int tok, int src, float g, int ch) {   // a build came back (ch 0 = failed)
     if (tok != gBoostTok[k][kind]) return;   // a newer volume, take, USE or RESET since: its own build follows
     gBoostLanded[k][kind] = tok;
-    id b = ch ? FHSndLoad(FHSndPath(FHBoostName(k, kind, NO)), ch == 1) : nil;   // stereo stays stereo, like the game's
+    id b = ch ? FHSndLoad(FHSndScratch(FHBoostName(k, kind, NO)), ch == 1) : nil;   // stereo stays stereo, like the game's
     if (ch && !b) FHSLog("boost: %s did not load", [FHBoostName(k, kind, NO) UTF8String]);
     gBoostBuf[k][kind] = b;
     gBoostG[k][kind] = b ? g : 0.0f;
@@ -736,7 +793,7 @@ static int FHBoostRefresh(int k, int kind) {
     gBoostAskG[k][kind] = g;
     int tok = ++gBoostTok[k][kind];
     NSString *inPath = src > 0 ? FHSndPath(@(kind == FHBoostTake ? kSlot[k].take : kSlot[k].use)) : gStockPath[k];
-    NSString *outPath = FHSndPath(FHBoostName(k, kind, NO)), *tmpPath = FHSndPath(FHBoostName(k, kind, YES));
+    NSString *outPath = FHSndScratch(FHBoostName(k, kind, NO)), *tmpPath = FHSndScratch(FHBoostName(k, kind, YES));
     dispatch_async(gBQ, ^{
         @autoreleasepool { FHBQBuild(k, kind, tok, src, g, inPath, outPath, tmpPath); }
     });
@@ -794,10 +851,14 @@ static void FHMainSaved(FHTakeInfo o) {   // a released take came back processed
         memcpy(gTakeEnv[k], o.env, sizeof o.env);
         gTakeDur[k] = o.dur;
         gTakeRMS[k] = o.takeRMS;
-        gTakeSerial[k] = MAX(gTakeSerial[k], gUsingSerial[k]) + 1;   // a new take is never the sound in use until USE
+        // a new take is never the sound in use until USE: above every serial here AND in the save (the other app's,
+        // when this take lands while the reload that would show them still waits for it)
+        gTakeSerial[k] = MAX(MAX(gTakeSerial[k], gUsingSerial[k]),
+                             MAX(FHStoreGetInt(@(kSlot[k].takeKey), 0), FHStoreGetInt(@(kSlot[k].useKey), 0))) + 1;
+        gTakeId[k] = FHFileIdOf(FHSndPath(@(kSlot[k].take)));        // our own write: not a change for FHSndReload
         gTakeBuf[k] = nil;                                            // PLAY / USE reload; a source still playing the old one keeps it
         FHBoostForget(k, FHBoostTake);                                // PLAY makes a new louder copy if it needs one
-        FHSndSave(k);
+        FHSndSaveTake(k);                                             // the take serial only
         FHSLog("%s take %d on screen: %.2f s, active rms %.1f dBFS, would play at gain %.3f", kSlot[k].name,
                gTakeSerial[k], o.dur, FHdB(o.takeRMS), FHSlotGain(k, kSlot[k].gameGain, o.takeRMS));
     }
@@ -805,23 +866,27 @@ static void FHMainSaved(FHTakeInfo o) {   // a released take came back processed
     gSaveResult = o.result;
 }
 
-static void FHMainLoaded(FHTakeInfo o, int ts, int us) {   // attach-time reads came back
+static void FHMainLoaded(FHTakeInfo o, int ts, int us, int tok) {   // attach-time / reload reads came back
     int k = o.slot;
     BOOL changed = NO;
-    if (o.stockRMS > 0) gStockRMS[k] = o.stockRMS;
+    if (o.stockRMS > 0) gStockRMS[k] = o.stockRMS;   // from any answer (only the attach one measures it)
+    if (tok != gLoadTok[k]) return;                  // a reload asked again since: its answer follows
     if (ts > 0 && gTakeSerial[k] == ts) {   // untouched since the read was asked for
         if (o.takeOK) {
             gTakeEnvN[k] = o.envN;
             memcpy(gTakeEnv[k], o.env, sizeof o.env);
             gTakeDur[k] = o.dur;
             gTakeRMS[k] = o.takeRMS;
-        } else {
+        } else if (FHFileGone(FHSndPath(@(kSlot[k].take)))) {   // really gone: the saved take goes too
             gTakeSerial[k] = 0;
+            gTakeId[k] = FHFileIdOf(FHSndPath(@(kSlot[k].take)));
             changed = YES;
+        } else {                             // there but unreadable now: not shown, the saved choice is left alone
+            FHSLog("%s take %d did not read: not shown this time (saved take kept)", kSlot[k].name, ts);
         }
     }
     if (us > 0 && gUsingSerial[k] == us) gUsingRMS[k] = o.useRMS;
-    if (changed && gVoiceChan[k]) FHSndSave(k);   // a missing channel must never wipe the saved choice
+    if (changed && gVoiceChan[k]) FHSndSaveTake(k);   // (the take is gone) a missing channel never wipes a choice
     FHSLog("voice ready: %s: take %d (%.2f s, rms %.1f dBFS), %s (rms %.1f dBFS, gain %.3f of %.1f), stock rms %.5f (PC %.5f), volume %d %%",
            kSlot[k].name, gTakeSerial[k], gTakeDur[k], FHdB(gTakeRMS[k]), gVoiceBuf[k] ? "recorded" : "default",
            FHdB(gUsingRMS[k]), FHSlotGain(k, kSlot[k].gameGain, gUsingRMS[k]), kSlot[k].gameGain,
@@ -874,7 +939,7 @@ static int FHQArm(BOOL forTake) {   // PlayAndRecord + a recorder prepared on re
         NSError *err = nil;
         NSDictionary *cfg = @{ AVFormatIDKey: @(kAudioFormatLinearPCM), AVSampleRateKey: @(44100.0), AVNumberOfChannelsKey: @1,
                                AVLinearPCMBitDepthKey: @16, AVLinearPCMIsBigEndianKey: @NO, AVLinearPCMIsFloatKey: @NO };
-        AVAudioRecorder *r = [[AVAudioRecorder alloc] initWithURL:[NSURL fileURLWithPath:FHSndPath(@"rec.caf")]
+        AVAudioRecorder *r = [[AVAudioRecorder alloc] initWithURL:[NSURL fileURLWithPath:FHSndScratch(@"rec.caf")]
                                                          settings:cfg error:&err];
         r.meteringEnabled = YES;
         if (!r || ![r prepareToRecord]) {   // creates rec.caf + the input queue (not started: no capture yet)
@@ -895,7 +960,7 @@ static void FHQDisarm(void) {
     if (gQRec) {                              // drop the input queue before leaving PlayAndRecord
         [gQRec stop];
         gQRec = nil;
-        unlink([FHSndPath(@"rec.caf") fileSystemRepresentation]);
+        unlink([FHSndScratch(@"rec.caf") fileSystemRepresentation]);
     }
     AVAudioSession *s = [AVAudioSession sharedInstance];
     if (!gQSwitched && ![s.category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) return;
@@ -935,7 +1000,8 @@ static void FHQSync(void) {   // bring the session + recorder to what main last 
     else FHQDisarm();
 }
 
-static void FHQLoad(int k, NSString *stockPath, int ts, int us) {   // at attach: bars + RMS from the files
+static void FHQLoad(int k, NSString *stockPath, int ts, int us, int tok) {   // attach / reload: bars + RMS from the files
+                                                                              // (stockPath nil: the stock RMS is known)
     FHTakeInfo o;
     memset(&o, 0, sizeof o);
     o.slot = k;
@@ -948,7 +1014,7 @@ static void FHQLoad(int k, NSString *stockPath, int ts, int us) {   // at attach
         o.takeRMS = FHActiveRMS(gPCM, n);
     }
     if (us > 0 && (n = FHReadMono(FHSndPath(@(kSlot[k].use)), gPCM, FH_MAXF)) > 0) o.useRMS = FHActiveRMS(gPCM, n);
-    dispatch_async(dispatch_get_main_queue(), ^{ FHMainLoaded(o, ts, us); });
+    dispatch_async(dispatch_get_main_queue(), ^{ FHMainLoaded(o, ts, us, tok); });
 }
 
 static void FHQStart(int tok, int k, double tDown) {   // touch-down on HOLD TO RECORD
@@ -1007,7 +1073,7 @@ static void FHQStop(int tok, int k, int how, int result, double live, double tSt
         if (gQSwitched && ![gOAL interrupted] && ![gOAL suspended] && ![s setActive:YES error:NULL])
             FHSLog("rec: session reactivate after the take FAILED");
     }
-    NSString *raw = FHSndPath(@"rec.caf");
+    NSString *raw = FHSndScratch(@"rec.caf");
     FHTakeInfo o;
     memset(&o, 0, sizeof o);
     o.slot = k;
@@ -1015,7 +1081,7 @@ static void FHQStop(int tok, int k, int how, int result, double live, double tSt
     if (result == FHSndPending) {
         o.result = FHSndInterrupted;   // the mic never went live
         if (took) {                    // 40 ms off the end of a lifted take: the finger leaving the glass
-            NSString *tmp = FHSndPath(@(kSlot[k].takeTmp));
+            NSString *tmp = FHSndScratch(@(kSlot[k].takeTmp));   // ours, then renamed into the shared folder
             int len = 0;
             float rms = 0;
             int r = FHProcess(raw, tmp, FH_SND_MAX, how == FHSndLifted ? 0.04 : 0.0, kSlot[k].channels, &len, &rms);
@@ -1049,7 +1115,6 @@ void FHSndAttach(id view) {
         gQ = dispatch_queue_create("com.mbucc9000.flappyhats.snd", DISPATCH_QUEUE_SERIAL);
         gBQ = dispatch_queue_create("com.mbucc9000.flappyhats.snd.boost", DISPATCH_QUEUE_SERIAL);
         dispatch_set_target_queue(gBQ, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0));
-        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
         FHVolLoad();
         for (int k = 0; k < FH_SND_SLOTS; k++) {
             gStockRMS[k] = kSlot[k].stockRMSPC;
@@ -1060,20 +1125,26 @@ void FHSndAttach(id view) {
                 [gVoiceChan[k] setGain:1.0f];
                 [gVoiceChan[k] setInterruptible:YES];   // both busy: the next one restarts a source instead of being dropped
             }
-            int savedUsing = (int)[d integerForKey:@(kSlot[k].useKey)];
-            gTakeSerial[k] = (int)[d integerForKey:@(kSlot[k].takeKey)];
-            gUsingSerial[k] = savedUsing;
+            NSString *use = FHSndPath(@(kSlot[k].use));
+            gTakeSerial[k] = FHStoreGetInt(@(kSlot[k].takeKey), 0);   // the shared save (pulled by -start just before)
+            gUsingSerial[k] = FHStoreGetInt(@(kSlot[k].useKey), 0);
+            gTakeId[k] = FHFileIdOf(FHSndPath(@(kSlot[k].take)));
+            gUseId[k] = FHFileIdOf(use);
             if (gUsingSerial[k] > 0 && gVoiceChan[k])
-                gVoiceBuf[k] = FHSndLoad(FHSndPath(@(kSlot[k].use)), kSlot[k].channels == 1);
-            if (gUsingSerial[k] > 0 && !gVoiceBuf[k]) {
-                FHSLog("%s did not load: default %s", kSlot[k].use, kSlot[k].name);
-                gUsingSerial[k] = 0;
+                gVoiceBuf[k] = FHSndLoad(use, kSlot[k].channels == 1);
+            if (gUsingSerial[k] > 0 && gVoiceChan[k] && !gVoiceBuf[k]) {
+                if (FHFileGone(use)) {      // really gone: the saved choice goes back to the default sound
+                    FHSLog("%s is gone: default %s", kSlot[k].use, kSlot[k].name);
+                    gUsingSerial[k] = 0;
+                    FHSndSaveUse(k);
+                } else {                    // there but did not load: the default for now, the saved choice is kept
+                    FHSLog("%s did not load: default %s this time (saved choice kept)", kSlot[k].use, kSlot[k].name);
+                }
             }
-            if (gVoiceChan[k] && savedUsing != gUsingSerial[k]) FHSndSave(k);
             NSString *stock = [[NSBundle mainBundle] pathForResource:@(kSlot[k].stockName) ofType:@(kSlot[k].stockExt)];
             gStockPath[k] = stock;
-            int ts = gTakeSerial[k], us = gUsingSerial[k];
-            FHQRun(^{ FHQLoad(k, stock, ts, us); });   // bars + RMS off main; "voice ready" when they land
+            int ts = gTakeSerial[k], us = gUsingSerial[k], tok = ++gLoadTok[k];
+            FHQRun(^{ FHQLoad(k, stock, ts, us, tok); });   // bars + RMS off main; "voice ready" when they land
         }
         NSOperationQueue *mq = [NSOperationQueue mainQueue];
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
@@ -1234,6 +1305,7 @@ void FHSndQuiet(void) {   // every sound (preview, tab swoosh, ...) off before t
 }
 
 void FHSndHeal(void) {    // frame loop, while not recording
+    if (gReloadWanted && gReady && !gRecPhase && !gSaving) FHSndReload();   // the take it waited for is done
     if (!gReady || gQBusy || gRecPhase) return;
     double now = CACurrentMediaTime();
     if (now < gHealT) return;
@@ -1247,7 +1319,7 @@ int FHSndUse(int slot) {
     int k = FHSlot(slot);
     if (gRecPhase || gSaving || !gVoiceChan[k] || !FHSndHasTake(k)) return 0;
     if (FHSndLive(k)) return 1;
-    NSString *take = FHSndPath(@(kSlot[k].take)), *tmp = FHSndPath(@(kSlot[k].useTmp)), *use = FHSndPath(@(kSlot[k].use));
+    NSString *take = FHSndPath(@(kSlot[k].take)), *tmp = FHSndScratch(@(kSlot[k].useTmp)), *use = FHSndPath(@(kSlot[k].use));
     NSFileManager *fm = [NSFileManager defaultManager];
     if (!gTakeBuf[k]) gTakeBuf[k] = FHSndLoad(take, kSlot[k].channels == 1);   // prove it loads before anything changes
     [fm removeItemAtPath:tmp error:NULL];
@@ -1260,7 +1332,8 @@ int FHSndUse(int slot) {
     gVoiceBuf[k] = gTakeBuf[k];        // the game's next one plays it (play: hook below)
     gUsingSerial[k] = gTakeSerial[k];
     gUsingRMS[k] = gTakeRMS[k];
-    FHSndSave(k);
+    gUseId[k] = FHFileIdOf(use);       // our own write: not a change for FHSndReload
+    FHSndSaveUse(k);                   // the in-use serial only (the take did not change)
     FHBoostForget(k, FHBoostTake);     // PLAY now uses the in-use copy
     FHBoostRefresh(k, FHBoostUse);     // over 100 %: a louder copy of the new sound
     FHSLog("use: take %d (%.2f s) is the %s, gain %.3f of %.1f (rms %.1f vs stock %.1f dBFS)", gTakeSerial[k], gTakeDur[k],
@@ -1275,7 +1348,8 @@ void FHSndReset(int slot) {
     gUsingSerial[k] = 0;
     gUsingRMS[k] = 0;
     unlink([FHSndPath(@(kSlot[k].use)) fileSystemRepresentation]);
-    FHSndSave(k);
+    gUseId[k] = FHFileIdOf(FHSndPath(@(kSlot[k].use)));   // gone, by us
+    FHSndSaveUse(k);
     FHBoostRefresh(k, FHBoostUse);     // over 100 %: a louder copy of the stock sound
     FHSLog("reset: default %s", kSlot[k].name);
 }
@@ -1305,9 +1379,8 @@ void FHSndSetVolume(int slot, int pct) {   // the slider let go (never while dra
     pct = MAX(0, MIN(200, pct));
     if (pct == gVolPct[k]) return;
     gVolPct[k] = pct;
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    [d setFloat:(float)pct / 100.0f forKey:@(kSlot[k].volKey)];
-    [d synchronize];
+    FHStoreSet(@(kSlot[k].volKey), @((float)pct / 100.0f));   // a float, as setFloat: wrote it
+    FHStoreSync();
     float g = FHBase(k, FHBoostUse, kSlot[k].gameGain) * FHVol(k);
     FHSLog("volume: %s %d %% = %s at play gain %.3f%s", kSlot[k].name, pct, gVoiceBuf[k] ? "recording" : "stock sound", g,
            g > FH_BOOST_MIN ? " (over 1.0: a louder copy)" : pct == 100 && !gVoiceBuf[k] ? " (the game's own call)" : "");
@@ -1343,6 +1416,63 @@ void FHSndDied(void) {   // Hats.x: the frame the ground stops (any death)
                src ? "playing" : "silent", gVolPct[FHSlotOver]);
     });
 #endif
+}
+
+// The other Flappy Hats app changed the shared save (Hats.x FHRefresh, after a pull): per slot, the take / in-use
+// serials AND the files' identities against what is loaded here (serials can repeat once a take was dropped to 0;
+// every write of a file is a rename, so its inode changes), and the volume. A changed sound is loaded again; its bars
+// and RMS come from gQ (FHQLoad), and FHMainLoaded then makes the louder copy it needs. Main thread; waits while a
+// take of ours is recording or being saved (FHSndHeal runs it once that is done), so gQ's take never races it.
+void FHSndReload(void) {
+    if (!gReady) return;                 // not attached yet: FHSndAttach reads everything fresh anyway
+    if (gRecPhase || gSaving) {
+        if (!gReloadWanted) FHSLog("reload: waiting for the take in progress");
+        gReloadWanted = YES;
+        return;
+    }
+    gReloadWanted = NO;
+    gVolLoaded = YES;
+    for (int k = 0; k < FH_SND_SLOTS; k++) {
+        NSString *take = FHSndPath(@(kSlot[k].take)), *use = FHSndPath(@(kSlot[k].use));
+        int ts = FHStoreGetInt(@(kSlot[k].takeKey), 0), us = FHStoreGetInt(@(kSlot[k].useKey), 0), vol = FHVolStored(k);
+        FHFileId tid = FHFileIdOf(take), uid = FHFileIdOf(use);
+        BOOL takeCh = ts != gTakeSerial[k] || !FHFileIdEq(tid, gTakeId[k]);
+        BOOL useCh = us != gUsingSerial[k] || !FHFileIdEq(uid, gUseId[k]) ||
+                     (us > 0 && gVoiceChan[k] && !gVoiceBuf[k]);   // one that did not load before: try again
+        BOOL volCh = vol != gVolPct[k];
+        if (!takeCh && !useCh && !volCh) continue;
+        int oldTake = gTakeSerial[k], oldUse = gUsingSerial[k], oldVol = gVolPct[k];
+        gVolPct[k] = vol;
+        if (useCh) {
+            gUsingSerial[k] = us;
+            gUseId[k] = uid;
+            gUsingRMS[k] = 0;                                   // measured again (FHQLoad)
+            // a source still playing the old buffer keeps its own retain (-[ALSource setBuffer:]): nothing freed mid-play
+            gVoiceBuf[k] = us > 0 && gVoiceChan[k] ? FHSndLoad(use, kSlot[k].channels == 1) : nil;
+            if (us > 0 && gVoiceChan[k] && !gVoiceBuf[k])
+                FHSLog("reload: %s did not load: default %s for now (saved choice kept)", kSlot[k].use, kSlot[k].name);
+            FHBoostForget(k, FHBoostUse);
+        }
+        if (takeCh) {
+            gTakeSerial[k] = ts;
+            gTakeId[k] = tid;
+            gTakeBuf[k] = nil;                                  // PLAY / USE load it again
+            gTakeEnvN[k] = 0;                                   // no bars until FHQLoad has read the new file
+            gTakeDur[k] = 0;
+            gTakeRMS[k] = 0;
+            FHBoostForget(k, FHBoostTake);
+        } else if (volCh) {
+            FHBoostForget(k, FHBoostTake);                      // PLAY makes a new one if it needs one
+        }
+        FHSLog("reload: %s: take %d -> %d%s, in use %d -> %d%s, volume %d -> %d %%", kSlot[k].name, oldTake, ts,
+               takeCh && ts == oldTake ? " (new file)" : "", oldUse, us, useCh && us == oldUse ? " (new file)" : "", oldVol, vol);
+        if (takeCh || useCh) {
+            int tok = ++gLoadTok[k];
+            FHQRun(^{ FHQLoad(k, nil, ts, us, tok); });         // FHMainLoaded refreshes the louder copy when it lands
+        } else {
+            FHBoostRefresh(k, FHBoostUse);                      // only the volume changed
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
